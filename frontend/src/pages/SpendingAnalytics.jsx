@@ -74,12 +74,13 @@ const SpendingAnalytics = () => {
         );
       }
 
-      if (!response.data.monthlySpending || !response.data.categorySpending) {
+      const analyticsData = response.data.data;
+      if (!analyticsData || !analyticsData.monthlySpending || !analyticsData.categorySpending) {
         console.error("Invalid analytics data structure:", response.data);
         throw new Error("Invalid analytics data received");
       }
 
-      setAnalytics(response.data);
+      setAnalytics(analyticsData);
       setError("");
     } catch (err) {
       console.error("Analytics error:", err);
@@ -124,13 +125,17 @@ const SpendingAnalytics = () => {
 
   if (!analytics) return null;
 
-  // Chart configurations
+  // Chart configurations - extract monthly spending array
+  const monthlySpendingArray = analytics?.monthlySpending || [];
+  const monthlyLabels = monthlySpendingArray.map(item => item.month);
+  const monthlyValues = monthlySpendingArray.map(item => item.amount);
+
   const monthlyData = {
-    labels: Object.keys(analytics?.monthlySpending || {}),
+    labels: monthlyLabels,
     datasets: [
       {
         label: "Monthly Spending (₹)",
-        data: Object.values(analytics?.monthlySpending || {}),
+        data: monthlyValues,
         borderColor: "#1976d2",
         backgroundColor: "rgba(25, 118, 210, 0.1)",
         tension: 0.4,
@@ -139,11 +144,16 @@ const SpendingAnalytics = () => {
     ],
   };
 
+  // Extract category spending array
+  const categorySpendingArray = analytics?.categorySpending || [];
+  const categoryLabels = categorySpendingArray.map(item => item.category);
+  const categoryValues = categorySpendingArray.map(item => item.amount);
+
   const categoryData = {
-    labels: Object.keys(analytics?.spendingByCategory || {}),
+    labels: categoryLabels,
     datasets: [
       {
-        data: Object.values(analytics?.spendingByCategory || {}),
+        data: categoryValues,
         backgroundColor: [
           "#FF6384",
           "#36A2EB",
@@ -207,7 +217,6 @@ const SpendingAnalytics = () => {
       },
     },
   };
-  da;
 
   const StatCard = ({ title, value, icon, color = "primary", subtitle }) => (
     <Card elevation={2} sx={{ height: "100%" }}>
@@ -269,10 +278,7 @@ const SpendingAnalytics = () => {
           <StatCard
             title="Total Spending"
             value={`₹${
-              (
-                analytics.totalOrderSpending +
-                analytics.totalSubscriptionSpending
-              )?.toFixed(2) || "0.00"
+              (analytics.overview?.totalSpending || 0)?.toFixed(2) || "0.00"
             }`}
             icon={<AttachMoney />}
             color="primary"
@@ -282,10 +288,7 @@ const SpendingAnalytics = () => {
         <Grid item xs={12} sm={6} md={3}>
           <StatCard
             title="Total Orders"
-            value={
-              analytics.recentTransactions?.filter((t) => t.type === "Order")
-                .length || 0
-            }
+            value={analytics.overview?.totalOrders || 0}
             icon={<ShoppingCart />}
             color="success"
             subtitle="Completed orders"
@@ -294,7 +297,7 @@ const SpendingAnalytics = () => {
         <Grid item xs={12} sm={6} md={3}>
           <StatCard
             title="Average Order"
-            value={`₹${analytics.averageOrderValue?.toFixed(2) || "0.00"}`}
+            value={`₹${(analytics.overview?.averageOrderValue || 0)?.toFixed(2) || "0.00"}`}
             icon={<Receipt />}
             color="warning"
             subtitle="Per order"
@@ -303,7 +306,7 @@ const SpendingAnalytics = () => {
         <Grid item xs={12} sm={6} md={3}>
           <StatCard
             title="Total Savings"
-            value={`₹${analytics.totalSavings?.toFixed(2) || "0.00"}`}
+            value={`₹${(analytics.overview?.totalSavings || 0)?.toFixed(2) || "0.00"}`}
             icon={<TrendingUp />}
             color="info"
             subtitle="From all orders"
@@ -357,13 +360,13 @@ const SpendingAnalytics = () => {
         </Typography>
         <Divider sx={{ mb: 2 }} />
 
-        {analytics.recentOrders && analytics.recentOrders.length > 0 ? (
+        {analytics.recentTransactions && analytics.recentTransactions.length > 0 ? (
           <TableContainer>
             <Table>
               <TableHead>
                 <TableRow>
                   <TableCell>
-                    <strong>Order ID</strong>
+                    <strong>Transaction ID</strong>
                   </TableCell>
                   <TableCell>
                     <strong>Date</strong>
@@ -372,7 +375,7 @@ const SpendingAnalytics = () => {
                     <strong>Amount</strong>
                   </TableCell>
                   <TableCell>
-                    <strong>Items</strong>
+                    <strong>Type</strong>
                   </TableCell>
                   <TableCell>
                     <strong>Status</strong>
@@ -380,16 +383,16 @@ const SpendingAnalytics = () => {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {analytics.recentOrders.map((order, index) => (
-                  <TableRow key={order.orderId || index} hover>
+                {analytics.recentTransactions.map((transaction, index) => (
+                  <TableRow key={transaction.id || index} hover>
                     <TableCell>
                       <Typography variant="body2" fontWeight="medium">
-                        #{order.orderId || `ORDER-${index + 1}`}
+                        #{transaction.id?.toString().slice(-8).toUpperCase() || `TXN-${index + 1}`}
                       </Typography>
                     </TableCell>
                     <TableCell>
                       <Typography variant="body2">
-                        {new Date(order.date).toLocaleDateString("en-US", {
+                        {new Date(transaction.date).toLocaleDateString("en-US", {
                           year: "numeric",
                           month: "short",
                           day: "numeric",
@@ -402,17 +405,19 @@ const SpendingAnalytics = () => {
                         fontWeight="bold"
                         color="primary"
                       >
-                        ${order.totalAmount?.toFixed(2) || "0.00"}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2">
-                        {order.items || "N/A"}
+                        ₹{transaction.amount?.toFixed(2) || "0.00"}
                       </Typography>
                     </TableCell>
                     <TableCell>
                       <Chip
-                        label={order.status || "Completed"}
+                        label={transaction.type || "Order"}
+                        size="small"
+                        variant="outlined"
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={transaction.status || "Completed"}
                         color="success"
                         size="small"
                         variant="outlined"
@@ -426,7 +431,7 @@ const SpendingAnalytics = () => {
         ) : (
           <Box textAlign="center" py={4}>
             <Typography variant="body1" color="textSecondary">
-              No recent orders found
+              No recent transactions found
             </Typography>
           </Box>
         )}

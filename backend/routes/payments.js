@@ -3,6 +3,7 @@ const { body, validationResult } = require("express-validator");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { isAuthenticatedUser } = require("../middleware/auth");
 const Product = require("../models/Product");
+const Order = require("../models/Order");
 
 const router = express.Router();
 
@@ -85,9 +86,9 @@ router.post(
       // Calculate final amount
       const finalAmount = totalAmount + taxAmount + shippingAmount;
 
-      // Create payment intent
+      // Create a provisional order with Processing status and store PI id on confirm
       const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(finalAmount * 100), // Convert to cents/paise
+        amount: Math.round(finalAmount * 100),
         currency: currency,
         metadata: {
           userId: req.user.id,
@@ -96,10 +97,42 @@ router.post(
         },
       });
 
+      // Build order items snapshot for record keeping
+      const orderItems = [];
+      for (const item of items) {
+        const product = await Product.findById(item.productId);
+        const price = (product.discountPrice || product.price);
+        orderItems.push({
+          product: product._id,
+          name: product.name,
+          quantity: item.quantity,
+          price,
+          image: product.images[0]?.url || "",
+        });
+      }
+
+      const order = await Order.create({
+        user: req.user.id,
+        orderItems,
+        shippingAddress: req.body.shippingAddress || {
+          name: req.user.name || "",
+          phone: req.user.phone || "",
+          email: req.user.email,
+          street: "",
+          city: "",
+          state: "",
+          zipCode: "",
+          country: "India",
+        },
+        paymentInfo: { id: paymentIntent.id, status: "requires_confirmation", method: "stripe" },
+        paidAt: new Date(),
+      });
+
       res.status(200).json({
         success: true,
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
+        orderId: order._id,
         amount: finalAmount,
         breakdown: {
           itemsTotal: totalAmount,
@@ -430,50 +463,38 @@ router.post("/webhook", async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Handle the event
   try {
     switch (event.type) {
-      case "payment_intent.succeeded":
+      case "payment_intent.succeeded": {
         const paymentIntent = event.data.object;
         console.log("Payment succeeded:", paymentIntent.id);
-
-        // Update order status
-        const order = await Order.findOne({
-          "paymentInfo.id": paymentIntent.id,
-        });
-
-        if (order && order.orderStatus === "Processing") {
-          order.orderStatus = "Placed";
+        const order = await Order.findOne({ "paymentInfo.id": paymentIntent.id });
+        if (order) {
+          order.paymentInfo.status = "succeeded";
+          if (order.orderStatus === "Processing") {
+            order.orderStatus = "Placed";
+          }
+          order.paidAt = new Date();
           await order.save();
         }
         break;
-
-      case "payment_intent.payment_failed":
-        console.log("Payment failed:", event.data.object.id);
+      }
+      case "payment_intent.payment_failed": {
+        const paymentIntent = event.data.object;
+        console.log("Payment failed:", paymentIntent.id);
+        await Order.updateOne({ "paymentInfo.id": paymentIntent.id }, { $set: { "paymentInfo.status": "failed", orderStatus: "Cancelled" } });
         break;
-
-      case "invoice.payment_succeeded":
+      }
+      case "invoice.payment_succeeded": {
         console.log("Invoice payment succeeded:", event.data.object.id);
-        // Handle subscription renewal
+        // TODO: update subscription status to active
         break;
-
-      case "invoice.payment_failed":
+      }
+      case "invoice.payment_failed": {
         console.log("Invoice payment failed:", event.data.object.id);
-        // Handle failed subscription payment
+        // TODO: update subscription status to past_due
         break;
-
-      case "customer.subscription.created":
-        console.log("Subscription created:", event.data.object.id);
-        break;
-
-      case "customer.subscription.updated":
-        console.log("Subscription updated:", event.data.object.id);
-        break;
-
-      case "customer.subscription.deleted":
-        console.log("Subscription deleted:", event.data.object.id);
-        break;
-
+      }
       default:
         console.log(`Unhandled event type ${event.type}`);
     }

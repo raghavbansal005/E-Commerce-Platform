@@ -53,6 +53,7 @@ const PaymentStep = ({
   onPaymentSuccess,
   loading,
   setLoading,
+  shippingAddress,
 }) => {
   const stripe = useStripe();
   const elements = useElements();
@@ -82,6 +83,7 @@ const PaymentStep = ({
           quantity: item.quantity,
         })),
         currency: "inr",
+        shippingAddress: shippingAddress || {},
       });
 
       if (response.data.success) {

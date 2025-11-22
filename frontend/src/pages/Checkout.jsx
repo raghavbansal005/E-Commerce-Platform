@@ -79,47 +79,19 @@ const Checkout = () => {
   const handlePaymentSuccess = async (paymentIntent) => {
     setLoading(true);
     try {
-      const orderData = {
-        orderItems: items.map((item) => ({
-          product: item.id,
-          name: item.name,
-          price: item.price,
-          quantity: item.quantity,
-          image: item.image,
-        })),
-        shippingAddress: {
-          name: getValues("name"),
-          phone: getValues("phone"),
-          email: getValues("email"),
-          street: getValues("street"),
-          city: getValues("city"),
-          state: getValues("state"),
-          zipCode: getValues("zipCode"),
-          country: getValues("country"),
-        },
-        paymentInfo: {
-          id: paymentIntent.id,
-          status: "succeeded",
-          method: "stripe",
-        },
-        itemsPrice: totalAmount,
-        taxPrice: calculateTax(),
-        shippingPrice: calculateShipping(),
-        totalPrice: calculateTotal(),
-        notes: "Order placed via Stripe payment",
-      };
-
-      const response = await ordersAPI.createOrder(orderData);
-
-      if (response.data.success) {
-        clearCart();
-        toast.success("Order placed successfully!");
-        setActiveStep(steps.length); // Move to completion step
+      // Payment intent already created the order on backend
+      // Just clear cart and navigate to orders
+      clearCart();
+      toast.success("Order placed successfully!");
+      setActiveStep(steps.length); // Move to completion step
+      
+      // Navigate to orders page after a short delay
+      setTimeout(() => {
         navigate("/orders");
-      }
+      }, 1500);
     } catch (error) {
-      console.error("Order creation failed:", error);
-      toast.error("Failed to create order. Please contact support.");
+      console.error("Order processing failed:", error);
+      toast.error("Failed to process order. Please contact support.");
     } finally {
       setLoading(false);
     }
@@ -229,6 +201,16 @@ const Checkout = () => {
             onPaymentSuccess={handlePaymentSuccess}
             loading={loading}
             setLoading={setLoading}
+            shippingAddress={{
+              name: getValues("name"),
+              phone: getValues("phone"),
+              email: getValues("email"),
+              street: getValues("street"),
+              city: getValues("city"),
+              state: getValues("state"),
+              zipCode: getValues("zipCode"),
+              country: getValues("country"),
+            }}
           />
         );
       case 2:

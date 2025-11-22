@@ -38,8 +38,13 @@ app.use(
   })
 );
 
-// Stripe webhook needs raw body, so handle it before JSON parsing
-app.use("/api/payments/webhook", express.raw({ type: "application/json" }));
+// Stripe webhook needs raw body, so handle it BEFORE JSON parsing
+// This must be before the general JSON parser
+app.post("/api/payments/webhook", express.raw({ type: "application/json" }), (req, res, next) => {
+  // This is a placeholder; the actual handler is in the payments route
+  // We just need to ensure raw body is captured here
+  next();
+});
 
 // Body parsing middleware
 app.use(express.json({ limit: "10mb" }));

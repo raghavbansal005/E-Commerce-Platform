@@ -5,46 +5,43 @@ const Subscription = require("../models/Subscription");
 
 const router = express.Router();
 
+// Helpers
+const monthKey = (d) =>
+  new Date(d).toLocaleString("default", { month: "short" });
+
 // @route   GET /api/analytics/dashboard
 // @desc    Get user analytics dashboard data
 // @access  Private
 router.get("/dashboard", isAuthenticatedUser, async (req, res) => {
   try {
     const userId = req.user.id;
-    console.log("Fetching analytics for user:", userId);
 
     // Get all orders for the user
-    const orders = await Order.find({ user: userId }).populate(
-      "items.product",
-      "name price category"
-    );
+    const orders = await Order.find({ user: userId })
+      .populate("orderItems.product", "name price category")
+      .lean();
 
     // Get all subscriptions for the user
-    const subscriptions = await Subscription.find({ user: userId }).populate(
-      "product",
-      "name price category"
-    );
+    const subscriptions = await Subscription.find({ user: userId })
+      .populate("product", "name price category")
+      .lean();
 
-    // Calculate total spending
+    // Totals
     const totalOrderSpending = orders.reduce(
-      (total, order) => total + order.totalPrice, // Changed from totalAmount to totalPrice
+      (total, order) => total + (order.totalPrice || 0),
       0
     );
+
     const totalSubscriptionSpending = subscriptions.reduce((total, sub) => {
-      // Calculate total spent on subscriptions (assuming monthly billing)
-      const monthsActive = Math.ceil(
-        (Date.now() - sub.createdAt) / (1000 * 60 * 60 * 24 * 30)
-      );
-      return total + sub.totalAmount * Math.max(1, monthsActive);
+      // If you want a cumulative approximation, use recorded totalAmount when available
+      return total + (sub.totalAmount || 0);
     }, 0);
 
     const totalSpending = totalOrderSpending + totalSubscriptionSpending;
 
-    // Monthly spending analysis
+    // Monthly spending for current year
     const monthlySpending = {};
     const currentYear = new Date().getFullYear();
-
-    // Initialize months
     for (let i = 0; i < 12; i++) {
       const month = new Date(currentYear, i).toLocaleString("default", {
         month: "short",
@@ -52,97 +49,81 @@ router.get("/dashboard", isAuthenticatedUser, async (req, res) => {
       monthlySpending[month] = 0;
     }
 
-    // Calculate monthly spending from orders
     orders.forEach((order) => {
-      const orderMonth = new Date(order.createdAt).toLocaleString("default", {
-        month: "short",
-      });
-      const orderYear = new Date(order.createdAt).getFullYear();
-      if (orderYear === currentYear) {
-        monthlySpending[orderMonth] += order.totalAmount;
+      const dt = new Date(order.createdAt);
+      if (dt.getFullYear() === currentYear) {
+        monthlySpending[monthKey(dt)] += order.totalPrice || 0;
       }
     });
 
-    // Calculate monthly spending from subscriptions
     subscriptions.forEach((sub) => {
-      const subMonth = new Date(sub.createdAt).toLocaleString("default", {
-        month: "short",
-      });
-      const subYear = new Date(sub.createdAt).getFullYear();
-      if (subYear === currentYear) {
-        monthlySpending[subMonth] += sub.totalAmount;
+      const dt = new Date(sub.createdAt);
+      if (dt.getFullYear() === currentYear) {
+        monthlySpending[monthKey(dt)] += sub.totalAmount || 0;
       }
     });
 
     // Category-wise spending
-    const categorySpending = {};
-
+    const categorySpendingMap = {};
     orders.forEach((order) => {
-      order.orderItems.forEach((item) => {
-        // Changed from items to orderItems
+      (order.orderItems || []).forEach((item) => {
         const category = item.product?.category || "Other";
-        const itemTotal = item.price * item.quantity;
-        categorySpending[category] =
-          (categorySpending[category] || 0) + itemTotal;
+        const itemTotal = (item.price || 0) * (item.quantity || 0);
+        categorySpendingMap[category] =
+          (categorySpendingMap[category] || 0) + itemTotal;
       });
     });
 
     subscriptions.forEach((sub) => {
       const category = sub.product?.category || "Other";
-      const monthsActive = Math.ceil(
-        (Date.now() - sub.createdAt) / (1000 * 60 * 60 * 24 * 30)
-      );
-      categorySpending[category] =
-        (categorySpending[category] || 0) +
-        sub.totalAmount * Math.max(1, monthsActive);
+      categorySpendingMap[category] =
+        (categorySpendingMap[category] || 0) + (sub.totalAmount || 0);
     });
 
-    // Recent transactions
-    const recentTransactions = orders
+    // Top categories
+    const topCategories = Object.entries(categorySpendingMap)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5)
+      .map(([category, amount]) => ({ category, amount }));
+
+    // Recent transactions (orders + subscriptions)
+    const recentOrders = [...orders]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 10)
       .map((order) => ({
         id: order._id,
         type: "Order",
-        amount: order.totalPrice, // Changed from totalAmount to totalPrice
+        amount: order.totalPrice || 0,
         date: order.createdAt,
-        status: order.orderStatus, // Changed from status to orderStatus
-        itemCount: order.orderItems.length, // Changed from items to orderItems
+        status: order.orderStatus,
+        itemCount: (order.orderItems || []).length,
       }));
 
-    // Add recent subscriptions
-    const recentSubscriptions = subscriptions
+    const recentSubs = [...subscriptions]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 5)
       .map((sub) => ({
         id: sub._id,
         type: "Subscription",
-        amount: sub.totalAmount,
+        amount: sub.totalAmount || 0,
         date: sub.createdAt,
         status: sub.status,
         product: sub.product?.name,
       }));
 
-    const allTransactions = [...recentTransactions, ...recentSubscriptions]
+    const allTransactions = [...recentOrders, ...recentSubs]
       .sort((a, b) => new Date(b.date) - new Date(a.date))
       .slice(0, 10);
 
-    // Calculate average order value
-    const averageOrderValue =
-      orders.length > 0 ? totalOrderSpending / orders.length : 0;
+    // Average order value
+    const averageOrderValue = orders.length
+      ? totalOrderSpending / orders.length
+      : 0;
 
-    // Calculate savings (if any discounts were applied)
-    const totalSavings = orders.reduce((total, order) => {
-      return total + (order.originalAmount - order.totalAmount || 0);
-    }, 0);
+    // Savings (unknown without original price snapshot) -> 0
+    const totalSavings = 0;
 
-    // Top spending categories
-    const topCategories = Object.entries(categorySpending)
-      .sort(([, a], [, b]) => b - a)
-      .slice(0, 5)
-      .map(([category, amount]) => ({ category, amount }));
-
-    // Spending trends
+    // Spending trend (last 6 months)
     const last6Months = [];
     for (let i = 5; i >= 0; i--) {
       const date = new Date();
@@ -151,20 +132,25 @@ router.get("/dashboard", isAuthenticatedUser, async (req, res) => {
       const year = date.getFullYear();
 
       const monthSpending = orders
-        .filter((order) => {
-          const orderDate = new Date(order.createdAt);
-          return (
-            orderDate.getMonth() === date.getMonth() &&
-            orderDate.getFullYear() === year
-          );
+        .filter((o) => {
+          const d = new Date(o.createdAt);
+          return d.getMonth() === date.getMonth() && d.getFullYear() === year;
         })
-        .reduce((total, order) => total + order.totalAmount, 0);
+        .reduce((sum, o) => sum + (o.totalPrice || 0), 0);
 
       last6Months.push({
         month: `${month} ${year}`,
         spending: monthSpending,
       });
     }
+
+    const statusCount = {
+      Processing: orders.filter((o) => o.orderStatus === "Processing").length,
+      Placed: orders.filter((o) => o.orderStatus === "Placed").length,
+      Shipped: orders.filter((o) => o.orderStatus === "Shipped").length,
+      Delivered: orders.filter((o) => o.orderStatus === "Delivered").length,
+      Cancelled: orders.filter((o) => o.orderStatus === "Cancelled").length,
+    };
 
     res.json({
       success: true,
@@ -177,21 +163,12 @@ router.get("/dashboard", isAuthenticatedUser, async (req, res) => {
           totalSavings,
         },
         monthlySpending: Object.entries(monthlySpending).map(
-          ([month, amount]) => ({
-            month,
-            amount,
-          })
+          ([month, amount]) => ({ month, amount })
         ),
         categorySpending: topCategories,
         recentTransactions: allTransactions,
         spendingTrend: last6Months,
-        ordersByStatus: {
-          pending: orders.filter((o) => o.status === "pending").length,
-          processing: orders.filter((o) => o.status === "processing").length,
-          shipped: orders.filter((o) => o.status === "shipped").length,
-          delivered: orders.filter((o) => o.status === "delivered").length,
-          cancelled: orders.filter((o) => o.status === "cancelled").length,
-        },
+        ordersByStatus: statusCount,
       },
     });
   } catch (error) {
@@ -215,40 +192,47 @@ router.get("/spending-summary", isAuthenticatedUser, async (req, res) => {
     const now = new Date();
 
     switch (period) {
-      case "week":
+      case "week": {
         const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
         dateFilter = { createdAt: { $gte: weekAgo } };
         break;
-      case "month":
-        const monthAgo = new Date(now.getFullYear(), now.getMonth(), 1);
-        dateFilter = { createdAt: { $gte: monthAgo } };
+      }
+      case "month": {
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        dateFilter = { createdAt: { $gte: monthStart } };
         break;
+      }
       case "year":
-      default:
-        const yearAgo = new Date(now.getFullYear(), 0, 1);
-        dateFilter = { createdAt: { $gte: yearAgo } };
+      default: {
+        const yearStart = new Date(now.getFullYear(), 0, 1);
+        dateFilter = { createdAt: { $gte: yearStart } };
         break;
+      }
     }
 
-    const orders = await Order.find({
-      user: userId,
-      ...dateFilter,
-    }).populate("items.product", "name price category images");
+    const orders = await Order.find({ user: userId, ...dateFilter })
+      .populate("orderItems.product", "name price category images")
+      .lean();
 
     const detailedSpending = orders.map((order) => ({
       orderId: order._id,
       date: order.createdAt,
-      totalAmount: order.totalAmount,
-      status: order.status,
-      items: order.items.map((item) => ({
-        productName: item.product?.name || "Unknown Product",
+      totalAmount: order.totalPrice || 0,
+      status: order.orderStatus,
+      items: (order.orderItems || []).map((item) => ({
+        productName: item.product?.name || item.name || "Unknown Product",
         category: item.product?.category || "Other",
         price: item.price,
         quantity: item.quantity,
-        total: item.price * item.quantity,
+        total: (item.price || 0) * (item.quantity || 0),
         image: item.product?.images?.[0]?.url,
       })),
     }));
+
+    const totalSpent = orders.reduce(
+      (sum, order) => sum + (order.totalPrice || 0),
+      0
+    );
 
     res.json({
       success: true,
@@ -257,12 +241,8 @@ router.get("/spending-summary", isAuthenticatedUser, async (req, res) => {
         orders: detailedSpending,
         summary: {
           totalOrders: orders.length,
-          totalSpent: orders.reduce((sum, order) => sum + order.totalAmount, 0),
-          averageOrderValue:
-            orders.length > 0
-              ? orders.reduce((sum, order) => sum + order.totalAmount, 0) /
-                orders.length
-              : 0,
+          totalSpent,
+          averageOrderValue: orders.length ? totalSpent / orders.length : 0,
         },
       },
     });
@@ -282,72 +262,61 @@ router.get("/user-spending", isAuthenticatedUser, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Get all orders for the user
-    const orders = await Order.find({ user: userId }).populate(
-      "items.product",
-      "name price category"
-    );
+    const orders = await Order.find({ user: userId })
+      .populate("orderItems.product", "name price category")
+      .lean();
 
-    // Calculate total spending
+    // Calculate total spending and monthly breakdown
     const totalSpending = orders.reduce(
-      (total, order) => total + order.totalAmount,
+      (total, order) => total + (order.totalPrice || 0),
       0
     );
     const totalOrders = orders.length;
 
-    // Monthly spending analysis
     const monthlySpending = {};
     const currentYear = new Date().getFullYear();
-
-    // Initialize months
     for (let i = 0; i < 12; i++) {
       const month = new Date(currentYear, i).toLocaleString("default", {
         month: "short",
       });
       monthlySpending[month] = 0;
     }
-
-    // Calculate monthly spending from orders
     orders.forEach((order) => {
-      const orderMonth = new Date(order.createdAt).toLocaleString("default", {
-        month: "short",
-      });
-      const orderYear = new Date(order.createdAt).getFullYear();
-      if (orderYear === currentYear) {
-        monthlySpending[orderMonth] += order.totalAmount;
+      const dt = new Date(order.createdAt);
+      if (dt.getFullYear() === currentYear) {
+        monthlySpending[monthKey(dt)] += order.totalPrice || 0;
       }
     });
 
     // Category-wise spending
     const spendingByCategory = {};
-
     orders.forEach((order) => {
-      order.items.forEach((item) => {
+      (order.orderItems || []).forEach((item) => {
         const category = item.product?.category || "Other";
-        const itemTotal = item.price * item.quantity;
+        const itemTotal = (item.price || 0) * (item.quantity || 0);
         spendingByCategory[category] =
           (spendingByCategory[category] || 0) + itemTotal;
       });
     });
 
-    // Recent orders with product details
-    const recentOrders = orders
+    // Recent orders
+    const recentOrders = [...orders]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 10)
       .map((order) => ({
         orderId: order._id.toString().slice(-8).toUpperCase(),
         date: order.createdAt,
-        totalAmount: order.totalAmount,
-        status: order.status,
+        totalAmount: order.totalPrice || 0,
+        status: order.orderStatus,
         items:
-          order.items.map((item) => item.product?.name).join(", ") ||
-          `${order.items.length} items`,
+          (order.orderItems || [])
+            .map((item) => item.product?.name || item.name)
+            .join(", ") || `${(order.orderItems || []).length} items`,
       }));
 
-    // Generate insights
-    const insights = [];
     const avgOrderValue = totalOrders > 0 ? totalSpending / totalOrders : 0;
 
+    const insights = [];
     if (avgOrderValue > 100) {
       insights.push(
         `Your average order value is $${avgOrderValue.toFixed(
@@ -355,18 +324,16 @@ router.get("/user-spending", isAuthenticatedUser, async (req, res) => {
         )} - you prefer quality purchases!`
       );
     }
-
     const topCategory = Object.entries(spendingByCategory).sort(
       ([, a], [, b]) => b - a
     )[0];
     if (topCategory) {
       insights.push(
-        `You spend most on ${
-          topCategory[0]
-        } category ($${topCategory[1].toFixed(2)})`
+        `You spend most on ${topCategory[0]} category ($${topCategory[1].toFixed(
+          2
+        )})`
       );
     }
-
     const thisMonth = new Date().toLocaleString("default", { month: "short" });
     const thisMonthSpending = monthlySpending[thisMonth] || 0;
     if (thisMonthSpending > 0) {
@@ -375,22 +342,19 @@ router.get("/user-spending", isAuthenticatedUser, async (req, res) => {
 
     res.json({
       success: true,
-      totalOrderSpending,
-      totalSubscriptionSpending,
-      monthlySpending,
-      categorySpending,
-      recentTransactions: allTransactions,
-      averageOrderValue,
-      totalSavings,
+      data: {
+        totals: { totalSpending, totalOrders, avgOrderValue },
+        monthlySpending,
+        spendingByCategory,
+        recentOrders,
+        insights,
+      },
     });
   } catch (error) {
     console.error("User spending analytics error:", error);
-    console.error("Error stack:", error.stack);
     res.status(500).json({
       success: false,
-      message:
-        "Failed to fetch analytics data: " + (error.message || "Unknown error"),
-      error: process.env.NODE_ENV === "development" ? error.stack : undefined,
+      message: "Failed to fetch analytics data",
     });
   }
 });
